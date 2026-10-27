@@ -32,5 +32,3 @@ py Hellu.py --checkpoint runs/fall-gru/checkpoint.pt
 py Hellu.py falldemo.mp4 --checkpoint runs/fall-gru/checkpoint.pt
 ```
 
-Mỗi `track_id` có một queue tối đa `min_frames` tư thế (mặc định 10). Tư thế được nạp theo `target_fps` trong checkpoint (mặc định 10 khung mỗi giây), nên 10 tư thế là khoảng một giây hành động. Khung mới vào, khung cũ nhất ra.
-
