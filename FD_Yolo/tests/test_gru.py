@@ -9,10 +9,13 @@ import torch
 from src.detectors.gru import (
     FallGRU,
     SequenceFallDetector,
+    collect_ready_windows,
     drop_stale_tracks,
     fall_decision,
     load_checkpoint,
+    publish_score,
     save_checkpoint,
+    window_probability,
 )
 from src.train import fit, split_indices
 
@@ -77,7 +80,7 @@ class CheckpointTest(unittest.TestCase):
             "num_layers": 1,
             "min_frames": 10,
             "decision_threshold": 0.5,
-            "pose_model": "yolo11x-pose.pt",
+            "pose_model": "yolo26n-pose.pt",
         }
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -106,22 +109,121 @@ class StepMatchesSequenceTest(unittest.TestCase):
 
 
 class SequenceFallDetectorTest(unittest.TestCase):
-    def test_samples_at_target_fps_and_waits_for_min_frames(self):
-        model = FallGRU(num_keypoints=2, hidden_size=4)
-        detector = SequenceFallDetector(model, target_fps=10, min_frames=2)
+    def test_keeps_one_pose_per_sample_tick_and_still_remembers_the_person(self):
+        detector = SequenceFallDetector(_small_model(), min_frames=10, target_fps=10)
         frame = np.zeros((2, 3), dtype=np.float32)
 
-        self.assertIsNone(detector.update(frame, 0.0))
-        self.assertIsNone(detector.update(frame, 0.05))
-        self.assertEqual(detector.accepted_frames, 1)
+        self.assertTrue(detector.update(frame, 0.0))
+        self.assertFalse(detector.update(frame, 0.05))
 
-        probability = detector.update(frame, 0.10)
+        self.assertEqual(detector.accepted_frames, 1)
+        self.assertEqual(detector.last_seen, 0.05)
+        self.assertIsNone(detector.snapshot())
+
+        self.assertTrue(detector.update(frame, 0.1))
+        self.assertEqual(detector.accepted_frames, 2)
+
+    def test_a_late_timestamp_enters_once(self):
+        detector = SequenceFallDetector(_small_model(), min_frames=10, target_fps=10)
+        frame = np.zeros((2, 3), dtype=np.float32)
+
+        self.assertTrue(detector.update(frame, 0.0))
+        self.assertTrue(detector.update(frame, 0.35))
+        self.assertFalse(detector.update(frame, 0.39))
 
         self.assertEqual(detector.accepted_frames, 2)
-        self.assertIsNotNone(probability)
-        self.assertGreaterEqual(probability, 0.0)
-        self.assertLessEqual(probability, 1.0)
-        self.assertEqual(detector.update(frame, 0.15), probability)
+
+    def test_enqueue_does_not_run_the_network(self):
+        model = _small_model()
+        calls = []
+        forward = model.forward
+
+        def counting(sequences, lengths):
+            calls.append(1)
+            return forward(sequences, lengths)
+
+        model.forward = counting
+        detector = SequenceFallDetector(model, min_frames=2, target_fps=10)
+        frame = np.zeros((2, 3), dtype=np.float32)
+        detector.update(frame, 0.0)
+        detector.update(frame, 0.1)
+
+        self.assertEqual(calls, [])
+        self.assertIsNotNone(detector.snapshot())
+        window_probability(model, detector.snapshot())
+        self.assertEqual(calls, [1])
+
+    def test_snapshot_keeps_the_old_window_after_the_queue_slides(self):
+        detector = SequenceFallDetector(_small_model(), min_frames=2, target_fps=10)
+        first = np.ones((2, 3), dtype=np.float32)
+        second = np.zeros((2, 3), dtype=np.float32)
+        third = np.full((2, 3), 0.25, dtype=np.float32)
+        detector.update(first, 0.0)
+        detector.update(second, 0.1)
+        held = detector.snapshot()
+        saved = held.copy()
+
+        detector.update(third, 0.2)
+
+        np.testing.assert_array_equal(held, saved)
+        latest = detector.snapshot()
+        np.testing.assert_array_equal(latest[0], second)
+        np.testing.assert_array_equal(latest[1], third)
+
+    def test_score_uses_the_ten_pose_copy(self):
+        model = _small_model()
+        detector = SequenceFallDetector(model, min_frames=2, target_fps=10)
+        first = np.ones((2, 3), dtype=np.float32)
+        second = np.zeros((2, 3), dtype=np.float32)
+        detector.update(first, 0.0)
+
+        self.assertIsNone(detector.score())
+
+        detector.update(second, 0.1)
+        expected = window_probability(model, np.stack([first, second]))
+
+        self.assertAlmostEqual(detector.score(), expected)
+        self.assertEqual(collect_ready_windows({1: detector}), [])
+
+
+class ScorePublishTest(unittest.TestCase):
+    def test_next_score_uses_the_latest_window_and_skips_the_ones_in_between(self):
+        detector = SequenceFallDetector(_small_model(), min_frames=2, target_fps=10)
+        states = {3: detector}
+        first = np.ones((2, 3), dtype=np.float32)
+        second = np.zeros((2, 3), dtype=np.float32)
+        third = np.full((2, 3), 0.25, dtype=np.float32)
+        fourth = np.full((2, 3), 0.5, dtype=np.float32)
+        detector.update(first, 0.0)
+
+        self.assertEqual(collect_ready_windows(states), [])
+        self.assertEqual(detector.scored_revision, detector.revision)
+
+        detector.update(second, 0.1)
+        jobs = collect_ready_windows(states)
+        track_id, queued, revision, snap = jobs[0]
+        self.assertIs(queued, detector)
+        detector.update(third, 0.2)
+        detector.update(fourth, 0.3)
+
+        self.assertTrue(publish_score(states, track_id, detector, revision, 0.2))
+        self.assertEqual(detector.probability, 0.2)
+        self.assertNotEqual(detector.scored_revision, detector.revision)
+
+        _, _, next_revision, latest = collect_ready_windows(states)[0]
+
+        self.assertNotEqual(next_revision, revision)
+        np.testing.assert_array_equal(snap[0], first)
+        np.testing.assert_array_equal(snap[1], second)
+        np.testing.assert_array_equal(latest[0], third)
+        np.testing.assert_array_equal(latest[1], fourth)
+
+    def test_publish_ignores_a_track_that_was_removed(self):
+        detector = SequenceFallDetector(_small_model(), min_frames=2, target_fps=10)
+        detector.update(np.zeros((2, 3), dtype=np.float32), 0.0)
+
+        self.assertFalse(publish_score({}, 3, detector, detector.revision, 0.4))
+        self.assertIsNone(detector.probability)
 
 
 class FallDecisionTest(unittest.TestCase):
@@ -152,12 +254,20 @@ class _Seen:
         self.last_seen = last_seen
 
 
+def _small_model():
+    return FallGRU(num_keypoints=2, hidden_size=4)
+
+
 def _logit(model, sequence):
     tensor = torch.from_numpy(np.asarray(sequence, dtype=np.float32)).unsqueeze(0)
     lengths = torch.tensor([tensor.shape[1]])
     model.eval()
     with torch.no_grad():
         return model(tensor, lengths).squeeze(0)
+
+
+def _window_probability(model, frames):
+    return float(torch.sigmoid(_logit(model, np.stack(frames))).item())
 
 
 def _probabilities(model, sequences):

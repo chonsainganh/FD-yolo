@@ -51,43 +51,120 @@ class FallGRU(nn.Module):
         return logit, hidden
 
 
-class SequenceFallDetector:
-    """Bộ nhớ một người: lấy mẫu theo target_fps rồi cập nhật GRU."""
+class SampleClock:
+    """Nhịp lấy mẫu. Mỗi khoảng 1/target_fps của timestamp thì nhận một khung."""
 
-    def __init__(self, model: FallGRU, target_fps: float = 10.0, min_frames: int = 10):
+    def __init__(self, target_fps: float):
         if target_fps <= 0:
             raise ValueError("target_fps phải lớn hơn 0.")
+        self.interval = 1.0 / float(target_fps)
+        self._next = None
+
+    def reset(self) -> None:
+        self._next = None
+
+    def accept(self, timestamp: float) -> bool:
+        timestamp = float(timestamp)
+        if self._next is None:
+            self._next = timestamp
+        if timestamp + 1e-6 < self._next:
+            return False
+        overshoot = timestamp - self._next
+        if overshoot < 0:
+            overshoot = 0.0
+        steps = int(overshoot / self.interval) + 1
+        self._next += steps * self.interval
+        return True
+
+
+class SequenceFallDetector:
+    """Một người, một hàng đợi tư thế. update chỉ nạp theo nhịp. GRU chấm trên bản sao."""
+
+    def __init__(self, model: FallGRU, min_frames: int = 10, target_fps: float = 10.0):
         if min_frames < 1:
             raise ValueError("min_frames phải lớn hơn hoặc bằng 1.")
         self.model = model
-        self.interval = 1.0 / float(target_fps)
         self.min_frames = int(min_frames)
+        self.clock = SampleClock(target_fps)
         self.reset()
 
     def reset(self) -> None:
-        self._hidden = None
-        self._last_accepted = None
-        self._probability = None
+        self._frames: list[np.ndarray] = []
+        self.probability = None
         self.accepted_frames = 0
         self.last_seen = None
+        self.revision = 0
+        self.scored_revision = 0
+        self.clock.reset()
 
-    def update(self, keypoints: np.ndarray, timestamp: float) -> float | None:
-        """Trả xác suất té khi đã đủ khung. Khung đến sớm hơn nhịp FPS thì giữ kết quả cũ."""
-        timestamp = float(timestamp)
-        self.last_seen = timestamp
-        due = self._last_accepted is None or timestamp - self._last_accepted >= self.interval
-        if not due:
-            if self.accepted_frames < self.min_frames:
-                return None
-            return self._probability
-
-        self._last_accepted = timestamp
+    def update(self, keypoints: np.ndarray, timestamp: float) -> bool:
+        """Ghi nhận người này. Đúng nhịp thì nạp tư thế và trượt cửa sổ. Không gọi GRU."""
+        self.last_seen = float(timestamp)
+        if not self.clock.accept(timestamp):
+            return False
         self.accepted_frames += 1
-        logit, self._hidden = self.model.step(keypoints, self._hidden)
-        self._probability = float(torch.sigmoid(logit).item())
-        if self.accepted_frames < self.min_frames:
+        self.revision += 1
+        self._frames.append(np.asarray(keypoints, dtype=np.float32).copy())
+        if len(self._frames) > self.min_frames:
+            del self._frames[0]
+        return True
+
+    def has_window(self) -> bool:
+        return len(self._frames) >= self.min_frames
+
+    def snapshot(self) -> np.ndarray | None:
+        """Bản sao (khung, khớp, 3) khi đủ min_frames. None khi hàng đợi còn thiếu."""
+        if not self.has_window():
             return None
-        return self._probability
+        return np.stack(self._frames)
+
+    def score(self) -> float | None:
+        """Chấm bản sao hiện tại trên luồng này. Luồng realtime chấm ngoài lock."""
+        sequence = self.snapshot()
+        if sequence is None:
+            return None
+        self.probability = window_probability(self.model, sequence)
+        self.scored_revision = self.revision
+        return self.probability
+
+
+def window_probability(model: FallGRU, frames) -> float:
+    """Chấm một cửa sổ từ trạng thái 0. Bộ nhớ GRU chỉ tóm tắt các khung trong bản sao này."""
+    sequence = np.asarray(frames, dtype=np.float32)
+    if sequence.ndim != 3:
+        sequence = np.stack(frames).astype(np.float32, copy=False)
+    tensor = torch.from_numpy(np.ascontiguousarray(sequence)).unsqueeze(0)
+    lengths = torch.tensor([sequence.shape[0]])
+    model.eval()
+    with torch.no_grad():
+        logit = model(tensor, lengths).squeeze(0)
+    return float(torch.sigmoid(logit).item())
+
+
+def collect_ready_windows(states: dict) -> list[tuple[int, SequenceFallDetector, int, np.ndarray]]:
+    """Mỗi track đủ khung và chưa chấm revision này thì trả bản sao.
+
+    Queue chưa đủ khung được đánh dấu đã xem để luồng GRU không quay vòng.
+    """
+    jobs = []
+    for track_id, detector in list(states.items()):
+        if detector.revision == detector.scored_revision:
+            continue
+        snapshot = detector.snapshot()
+        if snapshot is None:
+            detector.scored_revision = detector.revision
+            continue
+        jobs.append((int(track_id), detector, int(detector.revision), snapshot))
+    return jobs
+
+
+def publish_score(states: dict, track_id: int, detector: SequenceFallDetector, revision: int, probability: float) -> bool:
+    """Ghi xác suất của đúng bản sao đã chấm. Track đã bị xóa hoặc đã reset thì bỏ qua."""
+    if states.get(track_id) is not detector or detector.revision < revision:
+        return False
+    detector.probability = float(probability)
+    detector.scored_revision = int(revision)
+    return True
 
 
 def fall_decision(probabilities: list[float | None], threshold: float) -> tuple[bool, str]:

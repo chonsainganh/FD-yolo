@@ -10,7 +10,7 @@ from ultralytics import YOLO
 def extract_keypoints_from_video(
     video_path: str | Path,
     sequence_length: int,
-    model: YOLO | str | Path = "yolo11x-pose.pt",
+    model: YOLO | str | Path = "yolo26n-pose.pt",
     conf: float = 0.25,
     save_path: str | Path | None = None,
 ) -> np.ndarray:
@@ -41,7 +41,7 @@ def extract_keypoints_from_video(
 def extract_pose_sequence(
     video_path: str | Path,
     target_fps: float = 10.0,
-    model: YOLO | str | Path = "yolo11x-pose.pt",
+    model: YOLO | str | Path = "yolo26n-pose.pt",
     conf: float = 0.25,
     save_path: str | Path | None = None,
 ) -> np.ndarray:
@@ -118,6 +118,21 @@ def person_keypoints(result, num_keypoints: int) -> np.ndarray:
     keypoints[:count, :2] = xy[:count]
     keypoints[:count, 2] = data[index, :count, 2]
     return keypoints
+
+
+def track_boxes(result) -> dict[int, np.ndarray]:
+    """Hộp xyxy theo track_id, đơn vị pixel của khung vừa đọc. Không có id thì dict rỗng."""
+    boxes = getattr(result, "boxes", None)
+    if boxes is None:
+        return {}
+    track_ids = getattr(boxes, "id", None)
+    xyxy = getattr(boxes, "xyxy", None)
+    if track_ids is None or xyxy is None:
+        return {}
+    ids = track_ids.detach().cpu().numpy().astype(int)
+    coords = xyxy.detach().cpu().numpy()
+    count = min(len(ids), len(coords))
+    return {int(ids[index]): coords[index] for index in range(count)}
 
 
 def tracked_people(result) -> list[tuple[int, np.ndarray]]:

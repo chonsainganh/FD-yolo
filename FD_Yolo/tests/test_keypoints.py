@@ -9,6 +9,7 @@ from src.utils.keypoints import (
     person_keypoints,
     resample_sequence,
     resample_to_fps,
+    track_boxes,
     tracked_people,
 )
 
@@ -140,6 +141,26 @@ class TrackedPeopleTest(unittest.TestCase):
         result = _Result(data, xyn, np.array([0.9], dtype=np.float32))
 
         self.assertEqual(tracked_people(result), [])
+
+
+class TrackBoxesTest(unittest.TestCase):
+    def test_returns_pixel_boxes_for_track_ids(self):
+        data = np.zeros((1, 2, 3), dtype=np.float32)
+        xyn = np.zeros((1, 2, 2), dtype=np.float32)
+        result = _Result(data, xyn, np.array([0.9], dtype=np.float32))
+        result.boxes.id = _Tensor(np.array([7.0]))
+        result.boxes.xyxy = _Tensor(np.array([[10, 20, 40, 80]], dtype=np.float32))
+
+        boxes = track_boxes(result)
+
+        np.testing.assert_allclose(boxes[7], [10, 20, 40, 80])
+
+    def test_returns_no_boxes_without_track_ids(self):
+        data = np.zeros((1, 2, 3), dtype=np.float32)
+        xyn = np.zeros((1, 2, 2), dtype=np.float32)
+        result = _Result(data, xyn, np.array([0.9], dtype=np.float32))
+
+        self.assertEqual(track_boxes(result), {})
 
 
 class ExtractKeypointsValidationTest(unittest.TestCase):

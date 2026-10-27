@@ -1,6 +1,6 @@
 # Phát hiện ngã theo keypoints
 
-YOLO Pose trích 17 khớp mỗi người. GRU học phân biệt té và không té từ nhãn thư mục, trên chuỗi tư thế lấy mẫu 10 FPS.
+`yolo26n-pose.pt` trích 17 khớp mỗi người. GRU học phân biệt té và không té từ nhãn thư mục, trên chuỗi tư thế lấy mẫu 10 FPS.
 
 ## Dữ liệu
 
@@ -32,4 +32,5 @@ py Hellu.py --checkpoint runs/fall-gru/checkpoint.pt
 py Hellu.py falldemo.mp4 --checkpoint runs/fall-gru/checkpoint.pt
 ```
 
-Mỗi `track_id` có một bộ nhớ GRU riêng, cập nhật ở 10 FPS. Xác suất chỉ hiện sau `min_frames` khung (mặc định một giây). Bộ dữ liệu trên chưa được kiểm chứng cho nhiều người trong cùng một khung.
+Mỗi `track_id` có một queue tối đa `min_frames` tư thế (mặc định 10). Tư thế được nạp theo `target_fps` trong checkpoint (mặc định 10 khung mỗi giây), nên 10 tư thế là khoảng một giây hành động. Khung mới vào, khung cũ nhất ra.
+

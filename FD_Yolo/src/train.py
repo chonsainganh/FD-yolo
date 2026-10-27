@@ -144,7 +144,7 @@ def train(
     target_fps: float = 10.0,
     hidden_size: int = 64,
     lr: float = 1e-3,
-    pose_model: str = "yolo11x-pose.pt",
+    pose_model: str = "yolo26n-pose.pt",
     seed: int = 0,
     conf: float = 0.25,
     min_frames: int | None = None,
@@ -228,7 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-fps", type=float, default=10.0)
     parser.add_argument("--hidden-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--pose", default="yolo11x-pose.pt")
+    parser.add_argument("--pose", default="yolo26n-pose.pt")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--conf", type=float, default=0.25)
     return parser

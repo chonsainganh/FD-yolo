@@ -5,6 +5,4 @@ __pycache__/
 runs/
 .cursor
 
-# Trọng số YOLO. GitHub từ chối file nặng hơn 100MB.
-# yolo11x-pose.pt khoảng 113MB. Máy chưa có file thì ultralytics tự tải khi chạy.
 yolo*.pt

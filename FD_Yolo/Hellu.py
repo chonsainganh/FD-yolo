@@ -8,69 +8,35 @@ from ultralytics import YOLO
 
 from src.detectors.gru import (
     SequenceFallDetector,
+    collect_ready_windows,
     drop_stale_tracks,
     fall_decision,
     load_checkpoint,
+    publish_score,
+    window_probability,
 )
-from src.utils.keypoints import extract_keypoints_from_video, tracked_people
-
-__all__ = ["extract_keypoints_from_video", "run_realtime"]
-
-# YOLO xong thì lấy đúng bản đang nằm trong biến.
-latest_frame = None
-latest_frame_id = 0
-frame_condition = threading.Condition()
+from src.utils.keypoints import track_boxes, tracked_people
 
 
-def _read_frames(source, stop_event):
-    """Luồng 1: đọc liên tục và ghi đè latest_frame.
-    """
-    global latest_frame, latest_frame_id
+def frames_to_skip(elapsed: float, fps: float, next_index: int) -> int:
+    """Số khung cần bỏ để khung sắp đọc trùng đồng hồ thật. 0 khi khung tới vẫn chưa tới giờ."""
+    if fps <= 1.0 or next_index < 0:
+        return 0
+    target = int(elapsed * fps)
+    if target <= next_index:
+        return 0
+    return target - next_index
 
-    cap = cv2.VideoCapture(source)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    if not cap.isOpened():
-        print(f"Không mở được nguồn hình: {source}")
-        stop_event.set()
-        with frame_condition:
-            frame_condition.notify_all()
-        return
 
-    is_file = not isinstance(source, int)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-    interval = (1.0 / fps) if is_file and fps > 1.0 else 0.0
-    next_tick = time.perf_counter()
-
-    try:
-        while not stop_event.is_set():
-            ok, frame = cap.read()
-            if not ok:
-                break
-
-            snapshot = frame.copy()
-            with frame_condition:
-                latest_frame = snapshot
-                latest_frame_id += 1
-                frame_condition.notify()
-
-            if interval <= 0.0:
-                continue
-            next_tick += interval
-            delay = next_tick - time.perf_counter()
-            if delay > 0.0:
-                if stop_event.wait(delay):
-                    break
-            else:
-                next_tick = time.perf_counter()
-    finally:
-        cap.release()
-        stop_event.set()
-        with frame_condition:
-            frame_condition.notify_all()
+def seconds_until_frame(elapsed: float, fps: float, next_index: int) -> float:
+    """Số giây phải chờ để không phát nhanh hơn file. 0 khi khung này đã tới giờ."""
+    if fps <= 1.0:
+        return 0.0
+    return max(0.0, (next_index / fps) - elapsed)
 
 
 def _screen_size():
-    """Vùng hiển thị dùng được của màn hình chính, chừa thanh tiêu đề và taskbar."""
+
     try:
         import ctypes
 
@@ -85,83 +51,159 @@ def _screen_size():
 
 
 def _fit_frame(image, max_width, max_height):
-    """Thu nhỏ khung cho vừa cửa sổ hiển thị và giữ tỉ lệ. Không phóng to ảnh nhỏ hơn."""
+    """Đưa khung vừa vùng hiển thị và giữ tỉ lệ. Ảnh nhỏ được phóng lên tới mép màn hình."""
     height, width = image.shape[:2]
-    scale = min(max_width / width, max_height / height, 1.0)
-    if scale >= 0.999:
+    scale = min(max_width / width, max_height / height)
+    if abs(scale - 1.0) < 0.001:
         return image
     new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
-    return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    return cv2.resize(image, new_size, interpolation=interpolation)
 
 
-def _annotate(canvas, text, fallen, frame_id, skipped):
-    """Vẽ trạng thái ngã và số frame bị bỏ qua lên ảnh BGR."""
+def _annotate(canvas, text, fallen, skipped_now):
+    """Vẽ trạng thái ngã và số khung vừa bị bỏ vì YOLO chưa theo kịp đồng hồ."""
     color = (0, 0, 255) if fallen else (0, 180, 0)
-    detail = f"{text} | frame {frame_id} | bo qua {skipped}"
+    detail = f"{text} | skip {skipped_now}"
     cv2.rectangle(canvas, (8, 8), (8 + 18 * len(detail), 48), (0, 0, 0), -1)
     cv2.putText(canvas, detail, (16, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
     return canvas
 
 
-def _run_ai(model, stop_event, conf, fall_model, fall_config):
-    """Luồng 2: lấy khung đang nằm trong biến, yolo tìm người, GRU tính xác suất.
-    """
-    global latest_frame_id
+def mark_fallen_boxes(image, boxes, probabilities, threshold):
+    """Tô viền đỏ quanh người có xác suất đạt ngưỡng."""
+    height, width = image.shape[:2]
+    for track_id, xyxy in boxes.items():
+        score = probabilities.get(track_id)
+        if score is None or float(score) < threshold:
+            continue
+        x1 = min(width - 1, max(0, int(round(float(xyxy[0])))))
+        y1 = min(height - 1, max(0, int(round(float(xyxy[1])))))
+        x2 = min(width - 1, max(0, int(round(float(xyxy[2])))))
+        y2 = min(height - 1, max(0, int(round(float(xyxy[3])))))
+        cv2.rectangle(image, (x1, y1), (x2, y2), (0, 0, 255), 3)
+    return image
 
+
+def _run_ingest(source, stop_event, pose_model, conf, fall_model, fall_config, detectors, lock, score_ready):
+    """Đọc khung, YOLO lấy tư thế, nạp queue. Không chờ GRU."""
+    cap = cv2.VideoCapture(source)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    if not cap.isOpened():
+        print(f"Không mở được nguồn hình: {source}")
+        stop_event.set()
+        score_ready.set()
+        return
+
+    is_file = not isinstance(source, int)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    paced = is_file and fps > 1.0
+    clock_start = time.perf_counter()
+    next_index = 0
     window = "Fall detection"
     max_width, max_height = _screen_size()
-    detectors = {}
     threshold = float(fall_config["decision_threshold"])
-    target_fps = float(fall_config["target_fps"])
     min_frames = int(fall_config["min_frames"])
+    target_fps = float(fall_config.get("target_fps", 10.0))
 
-    while True:
-        with frame_condition:
-            while latest_frame_id == 0 and not stop_event.is_set():
-                frame_condition.wait(timeout=0.2)
-            if latest_frame is None or (stop_event.is_set() and latest_frame_id == 0):
+    try:
+        while not stop_event.is_set():
+            skipped_now = 0
+            if paced:
+                elapsed = time.perf_counter() - clock_start
+                delay = seconds_until_frame(elapsed, fps, next_index)
+                if delay > 0.0:
+                    if stop_event.wait(delay):
+                        break
+                    continue
+                elapsed = time.perf_counter() - clock_start
+                skipped_now = frames_to_skip(elapsed, fps, next_index)
+                missed_end = False
+                for _ in range(skipped_now):
+                    if not cap.grab():
+                        missed_end = True
+                        break
+                    next_index += 1
+                if missed_end:
+                    break
+            ok, frame = cap.read()
+            if not ok:
                 break
-            frame = latest_frame
-            frame_id = latest_frame_id
-            skipped = frame_id - 1
-            latest_frame_id = 0
+            frame = frame.copy()
+            if paced:
+                timestamp = next_index / fps
+            else:
+                timestamp = time.perf_counter() - clock_start
+            frame_id = next_index
+            next_index += 1
+            result = pose_model.track(source=frame, persist=True, verbose=False, conf=conf)[0]
+            boxes = track_boxes(result)
+            with lock:
+                seen = set()
+                for track_id, keypoints in tracked_people(result):
+                    seen.add(track_id)
+                    detector = detectors.get(track_id)
+                    if detector is None:
+                        detector = SequenceFallDetector(
+                            fall_model,
+                            min_frames=min_frames,
+                            target_fps=target_fps,
+                        )
+                        detectors[track_id] = detector
+                    if detector.update(keypoints, timestamp) and detector.has_window():
+                        score_ready.set()
+                drop_stale_tracks(detectors, seen, timestamp, grace=1.0)
+                probabilities = {
+                    track_id: detectors[track_id].probability
+                    for track_id in seen
+                    if track_id in detectors
+                }
+            fallen, text = fall_decision(list(probabilities.values()), threshold)
+            display = _fit_frame(
+                _annotate(
+                    mark_fallen_boxes(result.plot(), boxes, probabilities, threshold),
+                    text,
+                    fallen,
+                    skipped_now,
+                ),
+                max_width,
+                max_height,
+            )
+            cv2.imshow(window, display)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):
+                stop_event.set()
+                score_ready.set()
+                break
+    finally:
+        cap.release()
+        stop_event.set()
+        score_ready.set()
+        cv2.destroyAllWindows()
 
-        result = model.track(source=frame, persist=True, verbose=False, conf=conf)[0]
-        now = time.perf_counter()
-        seen = set()
-        probabilities = []
-        for track_id, keypoints in tracked_people(result):
-            seen.add(track_id)
-            detector = detectors.get(track_id)
-            if detector is None:
-                detector = SequenceFallDetector(
-                    fall_model,
-                    target_fps=target_fps,
-                    min_frames=min_frames,
-                )
-                detectors[track_id] = detector
-            probabilities.append(detector.update(keypoints, now))
-        drop_stale_tracks(detectors, seen, now, grace=1.0)
-        fallen, text = fall_decision(probabilities, threshold)
 
-        display = _fit_frame(
-            _annotate(result.plot(), text, fallen, frame_id, skipped),
-            max_width,
-            max_height,
-        )
-        cv2.imshow(window, display)
-        key = cv2.waitKey(1) & 0xFF
-        if key in (ord("q"), 27):
-            stop_event.set()
-            with frame_condition:
-                frame_condition.notify_all()
-            break
-
-    cv2.destroyAllWindows()
+def _score_windows(model, detectors, lock, score_ready, stop_event):
+    """GRU chấm bản sao 10 tư thế mới nhất. Queue vẫn được nạp trong lúc chấm."""
+    while not stop_event.is_set():
+        with lock:
+            jobs = collect_ready_windows(detectors)
+            if not jobs:
+                score_ready.clear()
+        if not jobs:
+            if stop_event.is_set():
+                break
+            score_ready.wait(timeout=0.2)
+            continue
+        for track_id, detector, revision, snapshot in jobs:
+            if stop_event.is_set():
+                break
+            probability = window_probability(model, snapshot)
+            with lock:
+                publish_score(detectors, track_id, detector, revision, probability)
 
 
 def run_realtime(source=0, checkpoint="runs/fall-gru/checkpoint.pt", pose=None, conf=0.25):
-    """Chạy luồng đọc hình và luồng AI.
+    """Chạy luồng đọc hình cùng YOLO, và luồng GRU.
 
     Parameters
     ----------
@@ -170,48 +212,41 @@ def run_realtime(source=0, checkpoint="runs/fall-gru/checkpoint.pt", pose=None, 
     checkpoint : str | Path
         Trọng số GRU và config đã lưu lúc train.
     pose : str | Path | None
-        YOLO Pose. None thì lấy pose_model trong checkpoint. Lệnh Hellu.py mặc định truyền yolo11x-pose.pt.
+        YOLO Pose. None thì lấy pose_model trong checkpoint. Lệnh Hellu.py mặc định truyền yolo26n-pose.pt.
     conf : float
         Ngưỡng điểm của YOLO. Hộp dưới ngưỡng này bị bỏ.
     """
-    global latest_frame, latest_frame_id
-
     fall_model, fall_config = load_checkpoint(checkpoint)
     pose_name = fall_config["pose_model"] if pose is None else pose
-
-    with frame_condition:
-        latest_frame = None
-        latest_frame_id = 0
-
     stop_event = threading.Event()
-    reader = threading.Thread(
-        target=_read_frames,
-        name="camera-reader",
-        args=(source, stop_event),
+    detectors = {}
+    lock = threading.Lock()
+    score_ready = threading.Event()
+    pose_model = pose_name if isinstance(pose_name, YOLO) else YOLO(str(pose_name))
+    ingest = threading.Thread(
+        target=_run_ingest,
+        name="pose-ingest",
+        args=(source, stop_event, pose_model, conf, fall_model, fall_config, detectors, lock, score_ready),
         daemon=False,
     )
-    reader.start()
-    worker = None
+    scorer = threading.Thread(
+        target=_score_windows,
+        name="gru-score",
+        args=(fall_model, detectors, lock, score_ready, stop_event),
+        daemon=False,
+    )
+    ingest.start()
+    scorer.start()
     try:
-        pose_model = pose_name if isinstance(pose_name, YOLO) else YOLO(str(pose_name))
-        worker = threading.Thread(
-            target=_run_ai,
-            name="ai-worker",
-            args=(pose_model, stop_event, conf, fall_model, fall_config),
-            daemon=False,
-        )
-        worker.start()
-        while reader.is_alive() and worker.is_alive():
-            reader.join(timeout=0.2)
+        while ingest.is_alive() and scorer.is_alive():
+            ingest.join(timeout=0.2)
     except KeyboardInterrupt:
         pass
     finally:
         stop_event.set()
-        with frame_condition:
-            frame_condition.notify_all()
-        reader.join()
-        if worker is not None:
-            worker.join()
+        score_ready.set()
+        ingest.join()
+        scorer.join()
 
 
 def _parse_source(text):
@@ -237,7 +272,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Phát hiện ngã realtime bằng GRU trên tư thế.")
     parser.add_argument("source", nargs="?", default="0", help="Chỉ số webcam hoặc đường dẫn video.")
     parser.add_argument("--checkpoint", default="runs/fall-gru/checkpoint.pt")
-    parser.add_argument("--pose", default="yolo11x-pose.pt", help="YOLO Pose dùng để lấy khớp. Mặc định là model của project mẫu.")
+    parser.add_argument("--pose", default="yolo26n-pose.pt", help="YOLO Pose dùng để lấy khớp.")
     parser.add_argument("--conf", type=float, default=0.25, help="Ngưỡng điểm YOLO. Hộp dưới ngưỡng bị bỏ.")
     args = parser.parse_args(argv)
     try:

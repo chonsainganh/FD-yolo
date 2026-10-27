@@ -6,10 +6,11 @@ import numpy as np
 
 
 class FallDetector(Protocol):
-    """Cập nhật một người và trả xác suất ngã.
+    """Một người theo thời gian.
 
-    None nghĩa là chưa đủ khung ở nhịp target_fps để quyết định.
+    update nạp tư thế theo nhịp và trả True khi khung đó vào queue.
+    Xác suất nằm ở probability sau khi GRU chấm bản sao của queue.
     """
 
-    def update(self, keypoints: np.ndarray, timestamp: float) -> float | None:
+    def update(self, keypoints: np.ndarray, timestamp: float) -> bool:
         """keypoints là (num_keypoints, 3) đã chuẩn hóa cùng cách với lúc train."""
