@@ -4,22 +4,21 @@
 
 ## Dữ liệu
 
-Video đặt theo thư mục, nhãn lấy từ tên thư mục:
+Video đặt theo thư mục, nhãn lấy từ tên thư mục. Train mặc định đọc bộ GMDCSA24:
 
 | Thư mục | Nhãn |
 |---|---|
-| `data/videos/falls` | 1 |
-| `data/videos/normal` | 0 |
-| `data/videos/no_fall_static` | 0 |
+| `GMDCSA24-A-Dataset-for-Human-Fall-Detection-in-Videos-master/Fall` | 1 |
+| `GMDCSA24-A-Dataset-for-Human-Fall-Detection-in-Videos-master/ADL` | 0 |
 
-Nguồn: https://drive.google.com/drive/folders/1A83twlTOPE_-QZElOKOnG8TzfI6Do3TY
+`data/videos` vẫn nằm trong project (`falls` = 1, `normal` và `no_fall_static` = 0) nhưng không phải dữ liệu của lệnh train mặc định.
 
 Mỗi video thành một chuỗi keypoints của người có bbox tin cậy nhất. Chuỗi được resample về **10 FPS**. Giá trị đó nằm trong `checkpoint.json` cùng trọng số.
 
 ## Train
 
 ```text
-py -m src.train --data data/videos --epochs 20 --output runs/fall-gru/checkpoint.pt
+py -m src.train --epochs 20 --output runs/fall-gru/checkpoint.pt
 ```
 
 `runs/fall-gru/checkpoint.pt` (trọng số)

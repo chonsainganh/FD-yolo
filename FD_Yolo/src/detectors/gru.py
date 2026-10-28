@@ -208,7 +208,7 @@ def load_checkpoint(path: str | Path) -> tuple[FallGRU, dict]:
     if not path.is_file():
         raise FileNotFoundError(
             "Không thấy checkpoint: "
-            f"{path}. Train bằng lệnh python -m src.train --data data/videos --output {path}"
+            f"{path}. Train bằng lệnh python -m src.train --output {path}"
         )
     try:
         payload = torch.load(path, map_location="cpu", weights_only=False)

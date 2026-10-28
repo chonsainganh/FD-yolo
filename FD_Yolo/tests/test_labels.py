@@ -27,6 +27,21 @@ class LabeledVideosTest(unittest.TestCase):
             [("a.MP4", 1), ("b.mp4", 1), ("lie.mov", 0), ("stand.avi", 0)],
         )
 
+    def test_reads_fall_and_adl_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Fall").mkdir()
+            (root / "ADL").mkdir()
+            (root / "Fall" / "subject1-01.mp4").write_bytes(b"f")
+            (root / "ADL" / "subject1-01.mp4").write_bytes(b"a")
+
+            found = labeled_videos(root)
+
+        self.assertEqual(
+            [(path.parent.name, path.name, label) for path, label in found],
+            [("ADL", "subject1-01.mp4", 0), ("Fall", "subject1-01.mp4", 1)],
+        )
+
     def test_rejects_a_missing_dataset_root(self):
         with self.assertRaises(FileNotFoundError):
             labeled_videos(Path("missing-dataset-root"))

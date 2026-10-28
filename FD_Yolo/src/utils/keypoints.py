@@ -11,7 +11,7 @@ def extract_keypoints_from_video(
     video_path: str | Path,
     sequence_length: int,
     model: YOLO | str | Path = "yolo26n-pose.pt",
-    conf: float = 0.25,
+    conf: float = 0.1,
     save_path: str | Path | None = None,
 ) -> np.ndarray:
     """Trích keypoints tư thế người từ video và chuẩn hóa về đúng sequence_length khung.
@@ -42,7 +42,7 @@ def extract_pose_sequence(
     video_path: str | Path,
     target_fps: float = 10.0,
     model: YOLO | str | Path = "yolo26n-pose.pt",
-    conf: float = 0.25,
+    conf: float = 0.1,
     save_path: str | Path | None = None,
 ) -> np.ndarray:
     """Trích một người mỗi khung rồi lấy mẫu lại về target_fps.

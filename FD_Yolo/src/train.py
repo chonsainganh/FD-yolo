@@ -146,7 +146,7 @@ def train(
     lr: float = 1e-3,
     pose_model: str = "yolo26n-pose.pt",
     seed: int = 0,
-    conf: float = 0.25,
+    conf: float = 0.1,
     min_frames: int | None = None,
 ) -> dict:
     """Trích chuỗi keypoints từ video rồi train và lưu checkpoint kèm config."""
@@ -222,7 +222,11 @@ def _evaluate(model, sequences, labels, indices, criterion, device):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train GRU phát hiện ngã trên chuỗi keypoints.")
-    parser.add_argument("--data", default="data/videos", help="Thư mục chứa falls, normal, no_fall_static.")
+    parser.add_argument(
+        "--data",
+        default="GMDCSA24-A-Dataset-for-Human-Fall-Detection-in-Videos-master",
+        help="Thư mục chứa Fall và ADL.",
+    )
     parser.add_argument("--output", default="runs/fall-gru/checkpoint.pt")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--target-fps", type=float, default=10.0)
@@ -230,7 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--pose", default="yolo26n-pose.pt")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--conf", type=float, default=0.25)
+    parser.add_argument("--conf", type=float, default=0.1)
     return parser
 
 

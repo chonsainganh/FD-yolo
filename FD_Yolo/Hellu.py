@@ -202,7 +202,7 @@ def _score_windows(model, detectors, lock, score_ready, stop_event):
                 publish_score(detectors, track_id, detector, revision, probability)
 
 
-def run_realtime(source=0, checkpoint="runs/fall-gru/checkpoint.pt", pose=None, conf=0.25):
+def run_realtime(source=0, checkpoint="runs/fall-gru/checkpoint.pt", pose=None, conf=0.1):
     """Chạy luồng đọc hình cùng YOLO, và luồng GRU.
 
     Parameters
@@ -273,7 +273,7 @@ def main(argv=None):
     parser.add_argument("source", nargs="?", default="0", help="Chỉ số webcam hoặc đường dẫn video.")
     parser.add_argument("--checkpoint", default="runs/fall-gru/checkpoint.pt")
     parser.add_argument("--pose", default="yolo26n-pose.pt", help="YOLO Pose dùng để lấy khớp.")
-    parser.add_argument("--conf", type=float, default=0.25, help="Ngưỡng điểm YOLO. Hộp dưới ngưỡng bị bỏ.")
+    parser.add_argument("--conf", type=float, default=0.1, help="Ngưỡng điểm YOLO. Hộp dưới ngưỡng bị bỏ.")
     args = parser.parse_args(argv)
     try:
         run_realtime(

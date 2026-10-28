@@ -3,7 +3,9 @@
 from pathlib import Path
 
 LABEL_BY_FOLDER = {
+    "fall": 1,
     "falls": 1,
+    "adl": 0,
     "normal": 0,
     "no_fall_static": 0,
 }
@@ -12,7 +14,7 @@ VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 
 
 def labeled_videos(root: str | Path) -> list[tuple[Path, int]]:
-    """Trả về (đường dẫn, nhãn) cho video trong falls, normal và no_fall_static.
+    """Trả về (đường dẫn, nhãn) cho video trong Fall, ADL, falls, normal và no_fall_static.
 
     Nhãn 1 là té ngã. Nhãn 0 là hoạt động thường hoặc tư thế nằm yên.
     """
@@ -21,9 +23,11 @@ def labeled_videos(root: str | Path) -> list[tuple[Path, int]]:
         raise FileNotFoundError(f"Không tìm thấy thư mục dữ liệu: {root}")
 
     found: list[tuple[Path, int]] = []
-    for name, label in LABEL_BY_FOLDER.items():
-        folder = root / name
+    for folder in root.iterdir():
         if not folder.is_dir():
+            continue
+        label = LABEL_BY_FOLDER.get(folder.name.casefold())
+        if label is None:
             continue
         for path in folder.rglob("*"):
             if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES:
@@ -31,7 +35,7 @@ def labeled_videos(root: str | Path) -> list[tuple[Path, int]]:
 
     if not found:
         raise ValueError(
-            f"Không có video trong {root}. Cần thư mục falls, normal hoặc no_fall_static."
+            f"Không có video trong {root}. Cần thư mục Fall, ADL, falls, normal hoặc no_fall_static."
         )
     found.sort(key=lambda item: str(item[0]).lower())
     return found
